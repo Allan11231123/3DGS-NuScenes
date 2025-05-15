@@ -1,4 +1,5 @@
 import os
+import stat
 import shutil
 
 
@@ -92,7 +93,8 @@ def write_extrinsics_file_novelcam(extrinsics_folder_path, file_mode, transform_
 
 
 def win_path(_path):
-    windows_path = _path.replace('/', '\\')
+#    windows_path = _path.replace('/', '\\')
+    windows_path = _path
     if windows_path[1] == ":":
         windows_path = windows_path[0].upper() + windows_path[1:]
 
@@ -105,29 +107,29 @@ def write_batch_file(sample_folder, colmap_manual_sparse_folder, colmap_sparse_f
     output_path = win_path(colmap_sparse_folder)
     win_drive = project_path[0].lower()
 
-    batchfile_path = os.path.join(project_path, "batch.bat")
+    batchfile_path = os.path.join(project_path, "batch.sh")
     batch_commands = [
-        '@echo off',
+        '#!/usr/bin/env bash',
+        'set -e',
         f'echo Starting COLMAP processing at {project_path} ...',
-        f'cd /{win_drive} "{project_path}"',
-        'REM Command 1: Feature Extraction',
-        'echo Extracting features...',
-        'call colmap feature_extractor --database_path ".\\database.db" --image_path ".\\images"',
+        f'cd "{project_path}"',
+        'echo "[1/4] Extracting features..."',
+        'colmap feature_extractor --database_path "./database.db" --image_path "./images" --ShiftExtraction.use_gpu 0',
         '',
-        'REM Command 2: Matching',
-        'echo Matching images...',
-        'call colmap exhaustive_matcher --database_path ".\\database.db"',
+        'echo "[2/4] Matching images..."',
+        'colmap exhaustive_matcher --database_path "./database.db" --ShiftMatching.use_gpu 0',
         '',
-        'REM Command 3: Triangulation',
-        'echo Triangulating points...',
-        f'call colmap point_triangulator --database_path ".\\database.db" --image_path ".\\images" --input_path "{input_path}" --output_path "{output_path}"',
+        'echo "[3/4] Triangulating points..."',
+        f'colmap mapper --database_path "./database.db" --image_path "./images" --Mapper.num_threads 8 --output_path "{output_path}"',
         '',
-        'REM Command 4: Convert to text file',
-        'echo Converting sparse output to .txt ...',
-        f'call colmap model_converter  --input_path "{output_path}" --output_path "{output_path}" --output_type TXT',
+        'echo "[4/4] Converting sparse output to .txt ..."',
+        f'colmap model_converter  --input_path "{output_path}" --output_path "{output_path}" --output_type TXT',
         '',
-        'echo COLMAP processing completed.'
+        'echo "COLMAP processing completed."'
     ]
 
     with open(batchfile_path, 'w') as file:
         file.write('\n'.join(batch_commands))
+    st = os.stat(batchfile_path)
+    os.chmod(batchfile_path, st.st_mode | stat.S_IEXEC)
+    print(f"Generated shell script: {batchfile_path}.")
