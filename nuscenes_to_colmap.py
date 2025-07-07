@@ -57,6 +57,7 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
         novel_cam_extrinsics = [cam.get_transform_vector() for cam in novel_cam_params]
         
         colmap_utils.write_intrinsics_file_novelcam(os.path.join(sample_dir, "novel"), novel_cam_intrinsics)
+        colmap_utils.write_extrinsics_file_novelcam(os.path.join(sample_dir, "novel"), "w", transform_vectors=transform_vectors)
         
         save_depth_paths = []
         

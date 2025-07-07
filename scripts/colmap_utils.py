@@ -73,7 +73,7 @@ def write_intrinsics_file_novelcam(intrinsics_folder_path, all_intrinsics, img_w
 
 def write_extrinsics_file_novelcam(extrinsics_folder_path, file_mode, transform_vectors):
     extrinsics_file = os.path.join(extrinsics_folder_path, "extrinsics.txt")
-
+    print(extrinsics_file)
     img_idx = 1
 
     if file_mode == "a":
@@ -114,13 +114,13 @@ def write_batch_file(sample_folder, colmap_manual_sparse_folder, colmap_sparse_f
         f'echo Starting COLMAP processing at {project_path} ...',
         f'cd "{project_path}"',
         'echo "[1/4] Extracting features..."',
-        'colmap feature_extractor --database_path "./database.db" --image_path "./images" --ShiftExtraction.use_gpu 0',
+        'colmap feature_extractor --database_path "./database.db" --image_path "./images" --SiftExtraction.use_gpu 0 --ImageReader.camera_model PINHOLE',
         '',
         'echo "[2/4] Matching images..."',
-        'colmap exhaustive_matcher --database_path "./database.db" --ShiftMatching.use_gpu 0',
+        'colmap exhaustive_matcher --database_path "./database.db" --SiftMatching.use_gpu 0',
         '',
         'echo "[3/4] Triangulating points..."',
-        f'colmap mapper --database_path "./database.db" --image_path "./images" --Mapper.num_threads 8 --output_path "{output_path}"',
+        f'colmap mapper --database_path "./database.db" --image_path "./images" --Mapper.num_threads 8 --output_path "{str(output_path).replace("/0","")}"',
         '',
         'echo "[4/4] Converting sparse output to .txt ..."',
         f'colmap model_converter  --input_path "{output_path}" --output_path "{output_path}" --output_type TXT',
