@@ -3,6 +3,7 @@ import shutil
 import argparse
 import numpy as np
 import open3d as o3d
+from open3d.geometry import PointCloud
 from nuscenes.nuscenes import NuScenes
 import scripts.process_nuscenes as process_nuscenes
 import scripts.colmap_utils as colmap_utils
@@ -25,6 +26,15 @@ def setup_directories(directory_path, use_lidar):
     
     for sub_dir in sub_dirs:
         os.makedirs(os.path.join(directory_path, sub_dir), exist_ok=True)
+
+def gt_pointcloud(pc:PointCloud,reference_info:list): #TODO: Implement this function with 
+    """
+    Get the ground truth point cloud from the NuScenes dataset(with RGB value).
+    """
+    pc_numpy = pc.points.T[:, :3]
+    o3d_pcl = o3d.geometry.PointCloud()
+    o3d_pcl.points = o3d.utility.Vector3dVector(pc_numpy)
+    return o3d_pcl
 
 def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, dataroot):
     directory_path = os.path.join(os.getcwd(), "data/colmap_data", f"scene-{scene_idx}")
@@ -56,13 +66,14 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
         transform_vectors, _ = sensor_params.global_pose(scene_sample)
         novel_cam_params = get_novel_cam_params(sensor_params)
         novel_cam_intrinsics = [cam.intrinsics for cam in novel_cam_params]
-        novel_cam_extrinsics = [cam.get_transform_vector() for cam in novel_cam_params]
         
         colmap_utils.write_intrinsics_file_novelcam(os.path.join(sample_dir, "novel"), novel_cam_intrinsics)
         colmap_utils.write_extrinsics_file_novelcam(os.path.join(sample_dir, "novel"), "w", transform_vectors=transform_vectors)
         
         save_depth_paths = []
         
+        pc_data = None
+        reference_images = list()
         # Copy LiDAR data if required
         if use_lidar:
             lidar_token = scene_sample['data'][lidar]
@@ -75,6 +86,7 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
                     f.write(f"lidar_translation:\n{lidar_translation[0]},{lidar_translation[1]},{lidar_translation[2]}\n")
                     f.write(f"lidar_rotation:\n{lidar_rotation[0]},{lidar_rotation[1]},{lidar_rotation[2]}\n")
             pcl_path = os.path.join(dataroot, nusc.get('sample_data', lidar_token)['filename'])
+            pc_data = o3d.io.read_point_cloud(pcl_path)
             pc = process_nuscenes.project_pointcloud_global_frame(nusc, pcl_path, lidar_data)
             pc_numpy = pc.points.T[:, :3]
             o3d_pcl = o3d.geometry.PointCloud()
@@ -87,7 +99,7 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
                 if not os.path.exists(os.path.join(sample_dir, "project_info", f"image_extrinsics_{cameras[idx]}.txt")):
                     camera_data = nusc.get('sample_data', scene_sample['data'][cameras[idx]])
                     calibrated_camera = nusc.get("calibrated_sensor", camera_data['calibrated_sensor_token'])
-                    camera_intrinsics = calibrated_camera['camera_intrinsic']
+                    camera_intrinsics = np.array(calibrated_camera['camera_intrinsic'])
                     camera_rotation = np.array(calibrated_camera['rotation'])
                     camera_translation = np.array(calibrated_camera['translation'])
                     with open(os.path.join(sample_dir, "project_info", f"image_extrinsics_{cameras[idx]}.txt"), "w") as f:
@@ -103,6 +115,7 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
                 source_path = os.path.join(dataroot, filename)
                 target_path = os.path.join(sample_dir, "images", f"image-{sample_count:02}-{img_id:02}.jpg")
                 if img_id<=6:
+                    reference_images.append({"image_path":target_path,"intrinsics":camera_intrinsics,"rotation":camera_rotation,"translation":camera_translation})
                     reference_path = os.path.join(sample_dir, "project_info", "reference_images")
                     if not os.path.exists(reference_path):
                         os.makedirs(reference_path, exist_ok=True)
@@ -112,7 +125,10 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
                 file.write(f"{img_id} {tv[0]} {tv[1]} {tv[2]} {tv[3]} {tv[4]} {tv[5]} {tv[6]} {idx + 1} image-{sample_count:02}-{img_id:02}.jpg\n\n")
                 save_depth_paths.append(os.path.join(sample_dir, "depth", f"image-{sample_count:02}-{img_id:02}.png"))
                 img_id += 1
-        
+        # Project point cloud to image to get RGB values
+        if pc_data is not None:
+            gt_pc = gt_pointcloud(pc_data, reference_images)
+            o3d.io.write_point_cloud(os.path.join(sample_dir, "lidar", f"lidar-{sample_count:02}.pcd"), gt_pc)
         process_nuscenes.img_lidar_depth_map(nusc, scene_sample, cameras, plot_img=False, save_paths=save_depth_paths)
         print(f"Processed sample {sample_count}, set {set_fill}")
 
