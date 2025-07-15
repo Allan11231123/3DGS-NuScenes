@@ -1,6 +1,7 @@
 import os
 import shutil
 import argparse
+import numpy as np
 import open3d as o3d
 from nuscenes.nuscenes import NuScenes
 import scripts.process_nuscenes as process_nuscenes
@@ -20,6 +21,7 @@ def setup_directories(directory_path, use_lidar):
     sub_dirs = ["sparse/0", "manual_sparse", "novel", "depth", "images"]
     if use_lidar:
         sub_dirs.append("lidar")
+        sub_dirs.append("project_info")
     
     for sub_dir in sub_dirs:
         os.makedirs(os.path.join(directory_path, sub_dir), exist_ok=True)
@@ -65,6 +67,13 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
         if use_lidar:
             lidar_token = scene_sample['data'][lidar]
             lidar_data = nusc.get('sample_data', lidar_token)
+            if not os.path.exists(os.path.join(sample_dir, "project_info", "lidar_extrinsics.txt")):
+                lidar_extrinsics = nusc.get("calibrated_sensor", lidar_data['calibrated_sensor_token'])
+                lidar_translation = np.array(lidar_extrinsics['translation'])
+                lidar_rotation = np.array(lidar_extrinsics['rotation'])
+                with open(os.path.join(sample_dir, "project_info", "lidar_extrinsics.txt"), "w") as f:
+                    f.write(f"lidar_translation:\n{lidar_translation[0]},{lidar_translation[1]},{lidar_translation[2]}\n")
+                    f.write(f"lidar_rotation:\n{lidar_rotation[0]},{lidar_rotation[1]},{lidar_rotation[2]}\n")
             pcl_path = os.path.join(dataroot, nusc.get('sample_data', lidar_token)['filename'])
             pc = process_nuscenes.project_pointcloud_global_frame(nusc, pcl_path, lidar_data)
             pc_numpy = pc.points.T[:, :3]
@@ -75,9 +84,30 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
         # Copy images and write extrinsics
         with open(os.path.join(colmap_manual_sparse_folder, "images.txt"), "w") as file:
             for idx, tv in enumerate(transform_vectors):
+                if not os.path.exists(os.path.join(sample_dir, "project_info", f"image_extrinsics_{cameras[idx]}.txt")):
+                    camera_data = nusc.get('sample_data', scene_sample['data'][cameras[idx]])
+                    calibrated_camera = nusc.get("calibrated_sensor", camera_data['calibrated_sensor_token'])
+                    camera_intrinsics = calibrated_camera['camera_intrinsic']
+                    camera_rotation = np.array(calibrated_camera['rotation'])
+                    camera_translation = np.array(calibrated_camera['translation'])
+                    with open(os.path.join(sample_dir, "project_info", f"image_extrinsics_{cameras[idx]}.txt"), "w") as f:
+                        f.write("camera_extrinsics:\n")
+                        f.write(f"translation:\n{camera_translation[0]},{camera_translation[1]},{camera_translation[2]}\n")
+                        f.write(f"rotation:\n{camera_rotation[0]},{camera_rotation[1]},{camera_rotation[2]},{camera_rotation[3]}\n")
+                    with open(os.path.join(sample_dir, "project_info", f"image_intrinsics_{cameras[idx]}.txt"), "w") as f:
+                        f.write(f"camera_intrinsics:\n")
+                        f.write(f"{camera_intrinsics[0][0]},{camera_intrinsics[0][1]},{camera_intrinsics[0][2]}\n")
+                        f.write(f"{camera_intrinsics[1][0]},{camera_intrinsics[1][1]},{camera_intrinsics[1][2]}\n")
+                        f.write(f"{camera_intrinsics[2][0]},{camera_intrinsics[2][1]},{camera_intrinsics[2][2]}\n")
                 filename = nusc.get('sample_data', scene_sample['data'][cameras[idx]])['filename']
                 source_path = os.path.join(dataroot, filename)
                 target_path = os.path.join(sample_dir, "images", f"image-{sample_count:02}-{img_id:02}.jpg")
+                if img_id<=6:
+                    reference_path = os.path.join(sample_dir, "project_info", "reference_images")
+                    if not os.path.exists(reference_path):
+                        os.makedirs(reference_path, exist_ok=True)
+                    project_reference_path = os.path.join(reference_path, f"image-{sample_count:02}-{img_id:02}.jpg")
+                    shutil.copy(source_path, project_reference_path)
                 shutil.copy(source_path, target_path)
                 file.write(f"{img_id} {tv[0]} {tv[1]} {tv[2]} {tv[3]} {tv[4]} {tv[5]} {tv[6]} {idx + 1} image-{sample_count:02}-{img_id:02}.jpg\n\n")
                 save_depth_paths.append(os.path.join(sample_dir, "depth", f"image-{sample_count:02}-{img_id:02}.png"))
@@ -98,6 +128,7 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
     
     # Delete Temp file
     colmap_utils.write_intrinsics_file_nuscenes(delete_temp=True)
+    print(f"Processing lidar extrinsics, cameras extrinsics and intrinsics for scene {scene['name']}")
     print(f"Finished processing scene {scene['name']}")
 
 def main():

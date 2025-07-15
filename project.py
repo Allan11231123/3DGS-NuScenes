@@ -1,64 +1,71 @@
+import argparse
+import os
 import numpy as np
 import open3d as o3d
 import cv2
 
-# --- 1. 讀點雲 ---
-pcd = o3d.io.read_point_cloud("input.pcd")
-points = np.asarray(pcd.points)
-N = len(points)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Process point cloud and color it using multi-camera projections.")
+    parser.add_argument("--input_pcd", type=str, required=True, help="Input point cloud file in PCD format.")
+    parser.add_argument("--project_info", type=str, required=True, help="Folder that contains projecting information.")
+    parser.add_argument("--output_ply", type=str, default="output.ply", help="Output colored point cloud file in PLY format.")
+    return parser.parse_args()
 
-# 準備一個 colors 陣列
-colors = np.zeros((N, 3), dtype=np.float64)
+def main():
+    args = parse_args()
+    # --- reading point cloud ---
+    pcd = o3d.io.read_point_cloud(args.input_pcd)
+    points = np.asarray(pcd.points)
+    N = len(points)
 
-# --- 2. 設定所有相機的參數 ---
-# 假設你有 M 個相機，各自的 K, R, t, 影像路徑存在下面 list 裡
-Ks = [K_cam0, K_cam1, ...]          # 每個 K_cam 是 3×3 numpy array
-RTs = [RT_cam0, RT_cam1, ...]       # 每個 RT_cam 是 3×4 numpy array [R|t]
-imgs = [cv2.imread("cam0.png"), ...]  # BGR 讀進來後會轉成 RGB
+    # prepare a colors array
+    colors = np.zeros((N, 3), dtype=np.float64)
 
-# --- 3. 多相機投影取色 ---
-# 我們先記每點目前最小的 z_depth，用來選最「正面」的相機
-best_z = np.full(N, np.inf)
+    # --- Set up camera parameters ---
+    Ks = [K_cam0, K_cam1, ...]       
+    RTs = [RT_cam0, RT_cam1, ...]
+    imgs = [cv2.imread("cam0.png"), ...]
+    # --- Multi-camera projection and color assignment ---
+    best_z = np.full(N, np.inf)
 
-for K, RT, img in zip(Ks, RTs, imgs):
-    # 拆 R, t
-    R = RT[:, :3]          # 3×3
-    t = RT[:, 3].reshape(3,1)  # 3×1
+    for K, RT, img in zip(Ks, RTs, imgs):
+        # split R, t
+        R = RT[:, :3]          # 3×3
+        t = RT[:, 3].reshape(3,1)  # 3×1
 
-    # 把所有點一次性轉到相機座標
-    # p_cam = R @ p_world + t
-    p_cam = (R @ points.T) + t   # shape = (3, N)
-    x, y, z = p_cam
+        # p_cam = R @ p_world + t
+        p_cam = (R @ points.T) + t   # shape = (3, N)
+        x, y, z = p_cam
 
-    # 投影到像平面
-    uv = (K @ p_cam)             # (3×3)×(3×N) → (3×N)
-    u = uv[0] / uv[2]
-    v = uv[1] / uv[2]
+        # project to image plane
+        uv = (K @ p_cam)             # (3×3)×(3×N) → (3×N)
+        u = uv[0] / uv[2]
+        v = uv[1] / uv[2]
 
-    # 四捨五入成整數像素
-    ui = np.round(u).astype(int)
-    vi = np.round(v).astype(int)
+        # round to integer pixel
+        ui = np.round(u).astype(int)
+        vi = np.round(v).astype(int)
 
-    h, w = img.shape[:2]
-    # 篩出「有效」的點：在影像範圍內 & 前方 z>0
-    valid = (
-        (ui >= 0) & (ui < w) &
-        (vi >= 0) & (vi < h) &
-        (z > 0)
+        h, w = img.shape[:2]
+        # filter valid points: within image bounds & in front of camera (z > 0)
+        valid = (
+            (ui >= 0) & (ui < w) &
+            (vi >= 0) & (vi < h) &
+            (z > 0)
+        )
+
+        # For each valid point, if this camera's z is smaller (more frontal) than before, update color
+        idx = np.where(valid)[0]
+        for i in idx:
+            if z[i] < best_z[i]:
+                best_z[i] = z[i]
+                b, g, r = img[vi[i], ui[i]]   # OpenCV defaults to BGR
+                colors[i] = np.array([r, g, b]) / 255.0
+
+    # --- Write back the point cloud and output PLY ---
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+    o3d.io.write_point_cloud(
+        "colored_output.ply",
+        pcd,
+        write_ascii=False
     )
-
-    # 對於每個 valid 點，如果這個相機對該點的 z 比先前更小（更正面），就更新 color
-    idx = np.where(valid)[0]
-    for i in idx:
-        if z[i] < best_z[i]:
-            best_z[i] = z[i]
-            b, g, r = img[vi[i], ui[i]]   # OpenCV 預設 BGR
-            colors[i] = np.array([r, g, b]) / 255.0
-
-# --- 4. 寫回點雲並輸出 PLY ---
-pcd.colors = o3d.utility.Vector3dVector(colors)
-o3d.io.write_point_cloud(
-    "colored_output.ply",
-    pcd,
-    write_ascii=False
-)
