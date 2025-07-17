@@ -10,6 +10,7 @@ import scripts.colmap_utils as colmap_utils
 from scripts.utils import SensorParameters, get_novel_cam_params
 from copy import deepcopy
 from pyquaternion import Quaternion
+import cv2
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process NuScenes dataset for COLMAP and novel view synthesis.")
@@ -29,58 +30,70 @@ def setup_directories(directory_path, use_lidar):
     for sub_dir in sub_dirs:
         os.makedirs(os.path.join(directory_path, sub_dir), exist_ok=True)
 
-def gt_pointcloud(pc:np.ndarray,reference_camera_info:list): #TODO: Implement this function
+def gt_pointcloud(pc:np.ndarray,reference_cameras_info:list): #TODO: Implement this function
     """
     Get the ground truth point cloud from the NuScenes dataset(with RGB value).
     """
-    target_pc = deepcopy(pc)
     points = pc.T[:, :3]  # Assuming pc is in shape (N, 4) with RGB values in the last column
     print(f"Shape of point cloud (should be (N,3)): {points.shape}")
+    camera_assignments = list()
+    points_camera_frame = list() # store the point cloud data under camera frame 
+    light_axis = list()
+    for idx, camera_info in enumerate(reference_cameras_info):
+        process_pts = deepcopy(points) # create a copy of original point cloud
+        width_i = camera_info['image_width']
+        height_i = camera_info['image_height']
+        rotation = camera_info['rotation'] #3x3
+        translation = camera_info['translation'] #1x3
+        intrinsics = camera_info['intrinsics']
+        # bring point cloud from ego frame to camera frame
+        points_cam = (process_pts-translation) @ rotation.T
+        # project point cloud onto the image plane
+        points_hom = (intrinsics@points_cam.T).T
+        points_camera_frame[idx] = points_hom #(N,3)
+        points_2d = points_hom[:,:2]/points_hom[:,2]
+        valid_i = (
+            (points_hom[:,2]>0)
+            & (points_2d[:,0]>=0) & (points_2d[:,0]<width_i)
+            & (points_2d[:,1]>=0) & (points_2d[:,1]<height_i)
+        )
+        camera_assignments[idx] = valid_i
+        light_axis[idx] = rotation[:,2]
+    assignments = np.full(points.shape[0],-1)
+    for j in range(points.shape[0]):
+        candidates = [i for i in range(len(reference_cameras_info)) if camera_assignments[i][j]]
+        if not candidates:
+            continue
+        angles = []
+        for i in candidates:
+            v = points_camera_frame[i][j,:] #(1x3)
+            cos_theta = (v @ light_axis[i]) / (np.linalg.norm(v) * np.linalg.norm(light_axis[i]))
+            angles.append(np.arccos(np.clip(cos_theta,-1,1)))
+        best_cam_id = candidates[np.argmin(angles)]
+        assignments[j] = best_cam_id
+    # convert each points array onto 2D plane for each camera
+    for idx, points in enumerate(points_camera_frame):
+        points_camera_frame[idx] = points[:,:2]/points[:,2]
+    rgb_value = [0 for _ in range(points.shape[0])]
+    rgb_value = np.zeros(points.shape[0])
+    for cam_id, cam_info in enumerate(reference_cameras_info):
+        image_path = cam_info['image_path']
+        image = cv2.imread(image_path,cv2.COLOR_BGR2RGB)
+        indices = np.where(assignments==cam_id) # one-dimension
+        if len(indices)==0:
+            continue
+        pts_2d = points_camera_frame[cam_id][indices].astype(int)
+        for i, (u,v) in zip(indices,pts_2d):
+            if 0 <= v < image.shape[1] and 0 <= u < image.shape[0]:
+                rgb_value[i] = image[v,u]
+    rgb_value = rgb_value / 255 # normalize to [0,1]
     pc_numpy = pc.T[:, :3]
     o3d_pcl = o3d.geometry.PointCloud()
     o3d_pcl.points = o3d.utility.Vector3dVector(pc_numpy)
+    o3d_pcl.color = o3d.utility.Vector3dVector(rgb_value)
+    o3d_pcl.estimate_normals()
     return o3d_pcl
-### multi cameras decision
-## step1: projecting and filtering which camera can see the point
-# points_hom: (N,4)，LiDAR 坐标系下的齐次点云
-# for i in range(M):
-#     T = T_l2c_list[i]           # 第 i 台相机的 4×4 外参
-#     K = K_list[i]               # 第 i 台相机的 3×3 内参
-#     # 1) 变换到该相机坐标系
-#     pts_cam = (T @ points_hom.T).T   # (N,4)
-#     xyz = pts_cam[:, :3]
-#     # 2) 投影到像素
-#     uv_h = (K @ xyz.T).T             # (N,3)
-#     uv = uv_h[:, :2] / uv_h[:, 2:3]  # (N,2)
-#     # 3) 深度 & 视野筛选
-#     valid_i = (
-#         (xyz[:,2] > 0)                  # 在相机前方
-#         & (uv[:,0] >= 0) & (uv[:,0] < width_i)
-#         & (uv[:,1] >= 0) & (uv[:,1] < height_i)
-#     )
-#     camera_assignments[i] = valid_i    # 布尔数组，标记哪些点“看得见”该相机
-## step2: decide the point belongs to which camera
-# 预先计算每台相机的“光轴方向” d_i（ego frame）
-# 若你有 calibrated_sensor 的旋转矩阵 R_s2e，第 3 列就是光轴向量
-# d_i = [R_s2e_list[i][:,2] for i in range(M)]  
 
-# 计算每个点到各相机光轴的夹角
-# assignments = np.full(N, -1, dtype=int)
-# for j in range(N):
-#     candidates = [i for i in range(M) if camera_assignments[i][j]]
-#     if not candidates:
-#         continue    # 该点不在任何相机视野内
-#     angles = []
-#     for i in candidates:
-#         # 向量从相机坐标原点到该点（在 ego frame）
-#         v = pts_ego[j] - t_e_list[i]
-#         cos_theta = (v @ d_i[i]) / (np.linalg.norm(v) * np.linalg.norm(d_i[i]))
-#         angles.append(np.arccos(np.clip(cos_theta, -1, 1)))
-#     # 取最小者
-#     best_cam = candidates[np.argmin(angles)]
-#     assignments[j] = best_cam
-## step3: get rgb value
-# image = cv2.imread(image_path)[:, :, ::-1]  # BGR to RGB
 def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, dataroot):
     directory_path = os.path.join(os.getcwd(), "data/colmap_data", f"scene-{scene_idx}")
     print(f"Created {directory_path}")
@@ -146,38 +159,34 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
         # Copy images and write extrinsics
         with open(os.path.join(colmap_manual_sparse_folder, "images.txt"), "w") as file:
             for idx, tv in enumerate(transform_vectors):
-                if not os.path.exists(os.path.join(sample_dir, "project_info", f"image_extrinsics_{cameras[idx]}.txt")):
-                    camera_data = nusc.get('sample_data', scene_sample['data'][cameras[idx]])
-                    calibrated_camera = nusc.get("calibrated_sensor", camera_data['calibrated_sensor_token'])
-                    camera_intrinsics = np.array(calibrated_camera['camera_intrinsic'])
-                    camera_rotation = np.array(calibrated_camera['rotation'])
-                    camera_translation = np.array(calibrated_camera['translation'])
-                    with open(os.path.join(sample_dir, "project_info", f"image_extrinsics_{cameras[idx]}.txt"), "w") as f:
-                        f.write("camera_extrinsics:\n")
-                        f.write(f"translation:\n{camera_translation[0]},{camera_translation[1]},{camera_translation[2]}\n")
-                        f.write(f"rotation:\n{camera_rotation[0]},{camera_rotation[1]},{camera_rotation[2]},{camera_rotation[3]}\n")
-                    with open(os.path.join(sample_dir, "project_info", f"image_intrinsics_{cameras[idx]}.txt"), "w") as f:
-                        f.write(f"camera_intrinsics:\n")
-                        f.write(f"{camera_intrinsics[0][0]},{camera_intrinsics[0][1]},{camera_intrinsics[0][2]}\n")
-                        f.write(f"{camera_intrinsics[1][0]},{camera_intrinsics[1][1]},{camera_intrinsics[1][2]}\n")
-                        f.write(f"{camera_intrinsics[2][0]},{camera_intrinsics[2][1]},{camera_intrinsics[2][2]}\n")
-                filename = nusc.get('sample_data', scene_sample['data'][cameras[idx]])['filename']
+                camera_data = nusc.get('sample_data', scene_sample['data'][cameras[idx]])
+                calibrated_camera = nusc.get("calibrated_sensor", camera_data['calibrated_sensor_token'])
+                image_width = camera_data['width']
+                image_height = camera_data['height']
+                camera_intrinsics = np.array(calibrated_camera['camera_intrinsic'])
+                camera_rotation = Quaternion(calibrated_camera['rotation']).rotation_matrix
+                camera_translation = np.array(calibrated_camera['translation']).reshape((1,3))
+                    
+                filename = camera_data['filename']
                 source_path = os.path.join(dataroot, filename)
                 target_path = os.path.join(sample_dir, "images", f"image-{sample_count:02}-{img_id:02}.jpg")
                 if img_id<=6:
-                    reference_camera_infos.append({"image_path":target_path,"intrinsics":camera_intrinsics,"rotation":camera_rotation,"translation":camera_translation})
-                    reference_path = os.path.join(sample_dir, "project_info", "reference_images")
-                    if not os.path.exists(reference_path):
-                        os.makedirs(reference_path, exist_ok=True)
-                    project_reference_path = os.path.join(reference_path, f"image-{sample_count:02}-{img_id:02}.jpg")
-                    shutil.copy(source_path, project_reference_path)
+                    reference_camera_infos.append({
+                        "image_path":target_path,
+                        "intrinsics":camera_intrinsics,
+                        "rotation":camera_rotation,
+                        "translation":camera_translation,
+                        "image_width":image_width,
+                        "image_height":image_height
+                    })
+                    
                 shutil.copy(source_path, target_path)
                 file.write(f"{img_id} {tv[0]} {tv[1]} {tv[2]} {tv[3]} {tv[4]} {tv[5]} {tv[6]} {idx + 1} image-{sample_count:02}-{img_id:02}.jpg\n\n")
                 save_depth_paths.append(os.path.join(sample_dir, "depth", f"image-{sample_count:02}-{img_id:02}.png"))
                 img_id += 1
         # Project point cloud to image to get RGB values
         if pc_data is not None:
-            gt_pc = gt_pointcloud(pc_data, reference_camera_infos)
+            gt_pc = gt_pointcloud(pc_data, reference_camera_infos) # gt_pc is in ego frame TODO: convert it to global frame before write out
             o3d.io.write_point_cloud(os.path.join(sample_dir, "lidar", f"lidar-{sample_count:02}.ply"), gt_pc)
         process_nuscenes.img_lidar_depth_map(nusc, scene_sample, cameras, plot_img=False, save_paths=save_depth_paths)
         print(f"Processed sample {sample_count}, set {set_fill}")
