@@ -5,6 +5,7 @@ import numpy as np
 import open3d as o3d
 from open3d.geometry import PointCloud
 from nuscenes.nuscenes import NuScenes
+from nuscenes.utils.data_classes import LidarPointCloud
 import scripts.process_nuscenes as process_nuscenes
 import scripts.colmap_utils as colmap_utils
 from scripts.utils import SensorParameters, get_novel_cam_params
@@ -36,9 +37,9 @@ def gt_pointcloud(pc:np.ndarray,reference_cameras_info:list): #TODO: Implement t
     """
     points = pc.T[:, :3]  # Assuming pc is in shape (N, 4) with RGB values in the last column
     print(f"Shape of point cloud (should be (N,3)): {points.shape}")
-    camera_assignments = list()
-    points_camera_frame = list() # store the point cloud data under camera frame 
-    light_axis = list()
+    camera_assignments = [None for _ in range(len(reference_cameras_info))]
+    points_camera_frame = [None for _ in range(len(reference_cameras_info))] # store the point cloud data under camera frame 
+    light_axis = [None for _ in range(len(reference_cameras_info))]
     for idx, camera_info in enumerate(reference_cameras_info):
         process_pts = deepcopy(points) # create a copy of original point cloud
         width_i = camera_info['image_width']
@@ -51,7 +52,8 @@ def gt_pointcloud(pc:np.ndarray,reference_cameras_info:list): #TODO: Implement t
         # project point cloud onto the image plane
         points_hom = (intrinsics@points_cam.T).T
         points_camera_frame[idx] = points_hom #(N,3)
-        points_2d = points_hom[:,:2]/points_hom[:,2]
+        print(f"Shape of points_hom (should be (N,3)): {points_hom.shape}")
+        points_2d = points_hom[:,:2]/points_hom[:,2:]
         valid_i = (
             (points_hom[:,2]>0)
             & (points_2d[:,0]>=0) & (points_2d[:,0]<width_i)
@@ -72,10 +74,14 @@ def gt_pointcloud(pc:np.ndarray,reference_cameras_info:list): #TODO: Implement t
         best_cam_id = candidates[np.argmin(angles)]
         assignments[j] = best_cam_id
     # convert each points array onto 2D plane for each camera
-    for idx, points in enumerate(points_camera_frame):
-        points_camera_frame[idx] = points[:,:2]/points[:,2]
+    temp_points_camera_frame = deepcopy(points_camera_frame)
+    points_camera_frame = [None for _ in range(len(reference_cameras_info))]
+    for idx, points in enumerate(temp_points_camera_frame):
+        points_camera_frame[idx] = points[:,:2]/points[:,2:]
+    del(temp_points_camera_frame) # free memory
     rgb_value = [0 for _ in range(points.shape[0])]
-    rgb_value = np.zeros(points.shape[0])
+    rgb_value = np.zeros((points.shape[0],3))
+    print(f"Shape of rgb_value (should be (N,3)): {rgb_value.shape}")
     for cam_id, cam_info in enumerate(reference_cameras_info):
         image_path = cam_info['image_path']
         image = cv2.imread(image_path,cv2.COLOR_BGR2RGB)
@@ -90,7 +96,7 @@ def gt_pointcloud(pc:np.ndarray,reference_cameras_info:list): #TODO: Implement t
     pc_numpy = pc.T[:, :3]
     o3d_pcl = o3d.geometry.PointCloud()
     o3d_pcl.points = o3d.utility.Vector3dVector(pc_numpy)
-    o3d_pcl.color = o3d.utility.Vector3dVector(rgb_value)
+    o3d_pcl.colors = o3d.utility.Vector3dVector(rgb_value)
     o3d_pcl.estimate_normals()
     return o3d_pcl
 
@@ -144,12 +150,21 @@ def process_scene(nusc, scene_idx, set_size, samples_per_scene, use_lidar, datar
                     f.write(f"lidar_translation:\n{lidar_translation[0]},{lidar_translation[1]},{lidar_translation[2]}\n")
                     f.write(f"lidar_rotation:\n{lidar_rotation[0]},{lidar_rotation[1]},{lidar_rotation[2]}\n")
             pcl_path = os.path.join(dataroot, nusc.get('sample_data', lidar_token)['filename'])
-            pc_data = np.asarray(o3d.io.read_point_cloud(pcl_path).points)
+            # pc_data = np.asarray(o3d.io.read_point_cloud(pcl_path).points)
+            pc_data = LidarPointCloud.from_file(pcl_path).points  # (4,N) format, where N is the number of points
             print(f"Shape of point cloud (should be (4,N)): {pc_data.shape}")
             cs_lidar = nusc.get('calibrated_sensor', lidar_data['calibrated_sensor_token'])
             rotation = Quaternion(cs_lidar['rotation']).rotation_matrix
             translation = np.array(cs_lidar['translation']).reshape(3, 1)
             pc_data = rotation.dot(pc_data[:3, :]) + translation # pc_data is now in ego frame
+            # filter out ground points
+            # pcd_ego = o3d.geometry.PointCloud()
+            # pcd_ego.points = o3d.utility.Vector3dVector(pc_data.T[:, :3])
+            # plane_model, inliers = pcd_ego.segment_plane(distance_threshold=0.3, ransac_n=3, num_iterations=1000)
+            # pcd_noground = pcd_ego.select_by_index(inliers, invert=True)
+            # pc_data = np.asarray(pcd_noground.points).T  # (3,N)
+            mask_nonground = pc_data[2, :] > 0.3  # filter out points with z < 0.3
+            pc_data = pc_data[:, mask_nonground]
             pc = process_nuscenes.project_pointcloud_global_frame(nusc, pcl_path, lidar_data)
             pc_numpy = pc.points.T[:, :3]
             o3d_pcl = o3d.geometry.PointCloud()
